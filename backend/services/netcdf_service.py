@@ -180,13 +180,19 @@ class NetCDFService:
             date_obj, time_index, variable
         )
         
-        lat_idx: int = int((lat + 90) * (data.shape[0] - 1) / 180)
+        # In GeoTIFF: row 0 = lat 90 (north), row lat_size-1 = lat -90 (south)
+        lat_idx: int = int((90 - lat) * (data.shape[0] - 1) / 180)
         lon_idx: int = int((lon + 180) * (data.shape[1] - 1) / 360)
         
         lat_idx = max(0, min(lat_idx, data.shape[0] - 1))
         lon_idx = max(0, min(lon_idx, data.shape[1] - 1))
         
-        return float(data[lat_idx, lon_idx])
+        value = data[lat_idx, lon_idx]
+        
+        if np.isnan(value):
+            raise ValueError(f"No data available at lat={lat}, lon={lon}")
+        
+        return float(value)
 
     @staticmethod
     def get_available_dates() -> list[str]:

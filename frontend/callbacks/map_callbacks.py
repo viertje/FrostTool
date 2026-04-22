@@ -89,10 +89,10 @@ def render_heatmap(
     stats: list = [
         html.Div(f"Date    : {d_start_str}"),
         html.Div(f"Variable: Temperature_Air_2m_Mean_24h"),
-        html.Div(f"Units   : {cs.get('units', '—')}"),
-        html.Div(f"Min     : {cs['min_value']:.3f}"),
-        html.Div(f"Max     : {cs['max_value']:.3f}"),
-        html.Div(f"Mean    : {cs['mean_value']:.3f}"),
+        html.Div(f"Units   : °C"),
+        html.Div(f"Min     : {cs['min_value'] - 273.15:.3f}"),
+        html.Div(f"Max     : {cs['max_value'] - 273.15:.3f}"),
+        html.Div(f"Mean    : {cs['mean_value'] - 273.15:.3f}"),
     ]
 
     trigger: dict = {

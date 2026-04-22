@@ -16,12 +16,14 @@ def create_app() -> FastAPI:
         version="1.0.0",
     )
     
+    # Add CORS middleware BEFORE routes
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=["http://localhost:8050", "http://127.0.0.1:8050", "*"],
         allow_credentials=True,
-        allow_methods=["*"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["*"],
+        expose_headers=["*"],
     )
     
     app.include_router(climate_router)

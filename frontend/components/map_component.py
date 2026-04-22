@@ -140,21 +140,38 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
   const tooltip = document.getElementById('tooltip');
 
   map.on('click', function(e) {{
-    if (!currentDate) return;
+    if (!currentDate) {{
+      console.warn('No date selected. Please render a heatmap first.');
+      return;
+    }}
     const lat = e.latlng.lat.toFixed(4);
     const lon = e.latlng.lng.toFixed(4);
     
+    console.log('Fetching value for:', currentDate, 'at', lat, lon);
+    
     fetch(`${{API}}/value?date_str=${{currentDate}}&lat=${{lat}}&lon=${{lon}}`)
-      .then(r => r.json())
+      .then(r => {{
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      }})
       .then(d => {{
-        const k = d.value != null ? d.value.toFixed(2) + ' K' : '—';
+        console.log('Received:', d);
+        const celsius = (d.value - 273.15).toFixed(2);
+        const k = d.value != null ? celsius + ' °C' : '—';
         tooltip.innerHTML =
           `<span class="hi">${{currentDate}}</span><br>` +
           `<span class="lo">lat ${{d.lat}}  lon ${{d.lon}}</span><br>` +
           `<span class="hi">${{k}}</span>`;
         tooltip.style.display = 'block';
+        tooltip.style.position = 'absolute';
+        tooltip.style.top = '16px';
+        tooltip.style.left = '50%';
+        tooltip.style.transform = 'translateX(-50%)';
       }})
-      .catch(() => {{ tooltip.style.display = 'none'; }});
+      .catch(err => {{
+        console.error('Error fetching value:', err);
+        tooltip.style.display = 'none';
+      }});
   }});
 
   map.on('mouseout', () => {{ tooltip.style.display = 'none'; }});

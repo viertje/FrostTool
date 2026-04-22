@@ -1,3 +1,17 @@
+# Development Commands
+
+Backend:
+
+```bash
+uvicorn backend.main:app --reload
+```
+
+Frontend:
+
+```bash
+python frontend/app.py
+```
+
 # NC Temperature Heatmap
 
 A full-stack app that loads global NetCDF (`.nc`) temperature files and visualises them as an interactive Leaflet heatmap using **georaster-layer-for-leaflet**.

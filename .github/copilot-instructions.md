@@ -10,7 +10,7 @@ Full-stack geospatial data application for visualising global climate data from 
 
 | Layer     | Technology                                              |
 |-----------|---------------------------------------------------------|
-| Backend   | Python 3.14.4, FastAPI, Uvicorn                          |
+| Backend   | Python 3.11+, FastAPI, Uvicorn                          |
 | Data I/O  | xarray, netCDF4, numpy, rasterio                        |
 | Frontend  | Dash (Plotly), dash-leaflet, georaster-layer-for-leaflet|
 | Caching   | functools.lru_cache / diskcache for heavy NetCDF reads  |
@@ -51,8 +51,7 @@ project-root/
 │   └── callbacks/
 │       ├── map_callbacks.py     # Map interactivity callbacks
 │       └── graph_callbacks.py   # Graph update callbacks
-├── data/
-│   └── nc/                      # NetCDF source files (gitignored)
+├── data/                        # Local data root (never committed — see DATA_ROOT)
 ├── tests/
 │   ├── backend/
 │   └── frontend/
@@ -81,32 +80,17 @@ project-root/
 - Use `mypy --strict`; fix all errors before committing.
 - Prefer **`dataclasses`** or **Pydantic models** over plain dicts for structured data.
 - Avoid mutable default arguments. Never use `def f(x=[])`.
-- All public functions and classes must have **docstrings** (Google style).
 
 ```python
 # Good
 def get_temperature_slice(
     path: Path,
     time_index: int,
-    variable: str = "t2m",
+    variable: str = "Temperature_Air_2m_Mean_24h",
 ) -> np.ndarray:
-    """Extract a 2-D temperature slice from a NetCDF file.
-
-    Args:
-        path: Absolute path to the .nc file.
-        time_index: Zero-based index along the time dimension.
-        variable: NetCDF variable name to extract.
-
-    Returns:
-        2-D float32 numpy array of shape (lat, lon).
-
-    Raises:
-        FileNotFoundError: If the .nc file does not exist.
-        KeyError: If the variable is absent in the file.
-    """
     ...
 
-# Bad — no types, no docstring, magic variable name
+# Bad — no types, magic variable name
 def get_data(p, t):
     ...
 ```
@@ -154,10 +138,89 @@ async def get_temperature(
 | Files/modules      | `snake_case`         | `netcdf_service.py`              |
 | Classes            | `PascalCase`         | `NetCDFService`                  |
 | Functions/methods  | `snake_case`         | `get_temperature_slice()`        |
-| Constants          | `UPPER_SNAKE_CASE`   | `DEFAULT_VARIABLE = "t2m"`       |
+| Constants          | `UPPER_SNAKE_CASE`   | `DATA_ROOT`, `VARIABLE`          |
 | Pydantic schemas   | `PascalCase` + noun  | `TemperatureRequest`             |
 | Dash component IDs | `kebab-case`         | `"heatmap-layer"`, `"time-slider"` |
 | API routes         | Plural nouns         | `/climate/temperatures`          |
+
+---
+
+## Data Source & Layout
+
+### Dataset
+
+The application uses **AgERA5** daily climate rasters. The current primary variable is:
+
+```python
+VARIABLE = "Temperature_Air_2m_Mean_24h"   # AgERA5 variable name — do not rename
+```
+
+### Directory Layout on Disk
+
+```
+DATA_ROOT/
+└── YYYY/
+    └── MM/
+        └── <any_filename_containing_YYYY-MM-DD>.nc
+```
+
+Example:
+```
+/mnt/data/agera5/
+└── 2023/
+    └── 07/
+        └── AgERA5_Temperature_Air_2m_Mean_24h_2023-07-15.nc
+```
+
+- `DATA_ROOT` is set via the environment variable `DATA_ROOT`.
+- The default fallback for local development is `C:\Olivier\Terra local\data\AgERA5\tmean_v2` (Windows). Always use `Path` so the code works cross-platform.
+- One `.nc` file per calendar day; the filename may be any string as long as it contains the date in `YYYY-MM-DD` format.
+
+### Configuration (`core/config.py`)
+
+```python
+from pathlib import Path
+import os
+
+DATA_ROOT = Path(os.environ.get("DATA_ROOT", r"C:\Olivier\Terra local\data\AgERA5\tmean_v2"))
+VARIABLE   = "Temperature_Air_2m_Mean_24h"
+```
+
+- `DATA_ROOT` and `VARIABLE` are the only two values that need to change when switching datasets.
+- Never import `os.environ` or construct data paths outside of `core/config.py`.
+
+### File Resolution
+
+All path-building logic lives exclusively in `NetCDFService`. The canonical resolver:
+
+```python
+def resolve_nc_path(date: datetime.date) -> Path:
+    """Return the .nc file path for a given date.
+
+    Searches DATA_ROOT/YYYY/MM/ for any file whose name contains the
+    ISO date string (YYYY-MM-DD).
+
+    Raises:
+        DatasetNotFoundError: If no matching file exists for that date.
+    """
+    folder = DATA_ROOT / f"{date.year:04d}" / f"{date.month:02d}"
+    pattern = date.isoformat()          # "YYYY-MM-DD"
+    matches = list(folder.glob(f"*{pattern}*.nc"))
+    if not matches:
+        raise DatasetNotFoundError(date)
+    return matches[0]
+```
+
+- Always use `date.isoformat()` for glob patterns — never build date strings manually.
+- If multiple files match the same date (unexpected), log a warning and use the first match.
+- API endpoints accept dates as `YYYY-MM-DD` strings; always parse them to `datetime.date` in the route handler before passing to the service.
+
+### What NOT to Do (data-specific)
+
+- ❌ Do not hardcode year/month folder names — always derive them from the `datetime.date` object.
+- ❌ Do not scan `DATA_ROOT` recursively at startup to build an index; resolve paths lazily per request.
+- ❌ Do not assume the filename follows any specific prefix or suffix beyond containing the ISO date.
+- ❌ Do not commit any `.nc` files or reference absolute local paths outside `core/config.py`.
 
 ---
 
@@ -165,8 +228,8 @@ async def get_temperature(
 
 These rules exist so that new parameters (wind, precipitation, soil moisture) and new features (crop damage, timeline graphs) can be added without architectural rewrites.
 
-1. **Parameter-agnostic services**: `NetCDFService` must accept a `variable: str` argument. Never hard-code `"t2m"` (or any variable name) outside of configuration or constants.
-2. **Config-driven file paths**: All `.nc` file paths and variable-to-file mappings live in `core/config.py` (loaded from environment variables or a `.env` file). No hardcoded paths elsewhere.
+1. **Parameter-agnostic services**: `NetCDFService` must accept a `variable: str` argument. Never hard-code `"Temperature_Air_2m_Mean_24h"` (or any variable name) outside of `core/config.py`.
+2. **Config-driven file paths**: All `.nc` file paths and variable-to-file mappings live in `core/config.py` (loaded from environment variables or a `.env` file). No hardcoded paths elsewhere. See **Data Source & Layout** section for the canonical path-resolution rules.
 3. **Pluggable aggregation**: `AggregationService` must accept a region geometry (GeoJSON) and a variable name. New aggregation methods (mean, max, weighted crop-damage index) are added as strategy functions, not as branching conditionals.
 4. **Component isolation**: Each Dash component accepts only the data it needs as props — no component reaches into another component's state.
 5. **Versioned API**: All routes are prefixed `/api/v1/`. Breaking changes increment the version; old versions are deprecated, not deleted immediately.

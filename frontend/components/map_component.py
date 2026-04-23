@@ -42,6 +42,29 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
     position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
     z-index:9998;display:none;
     font-family:'Space Mono',monospace;font-size:13px;color:#D6CDA4;
+    text-align:center;
+  }}
+  
+  /* Spinner styles */
+  .spinner{{
+    width:50px;height:50px;
+    border:4px solid rgba(214,205,164,0.2);
+    border-top:4px solid #D6CDA4;
+    border-radius:50%;
+    animation:spin 0.8s linear infinite;
+    margin:0 auto 12px;
+  }}
+  
+  @keyframes spin{{
+    0%{{transform:rotate(0deg);}}
+    100%{{transform:rotate(360deg);}}
+  }}
+  
+  .loading-text{{
+    color:#D6CDA4;
+    font-size:12px;
+    letter-spacing:1px;
+    opacity:0.9;
   }}
 </style>
 </head>
@@ -54,7 +77,10 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
   <div class="leg-units" id="leg-units"></div>
 </div>
 <div id="tooltip">—</div>
-<div id="loading">⏳ Loading raster…</div>
+<div id="loading">
+  <div class="spinner"></div>
+  <div class="loading-text">LOADING RASTER</div>
+</div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/georaster@1.6.0/dist/georaster.browser.bundle.min.js"></script>
@@ -74,13 +100,25 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
   let currentLayer = null;
   let currentDate = null;
   let dateRange = null;
+  let currentTempType = "mean";
   let vmin = 0, vmax = 1;
   let continentBounds = {{}};
 
-  const colorScale = chroma.scale([
-    '#00007f','#0000ff','#007fff','#00ffff',
-    '#7fff7f','#ffff00','#ff7f00','#ff0000','#7f0000'
-  ]).mode('lab');
+  // Absolute temperature color scale (Celsius to color mapping)
+  // -40°C to 50°C range
+  const absoluteColorScale = chroma.scale([
+    '#00007f', '#0000ff', '#007fff', '#00ffff',  // -40 to 0°C (frost/ice - blue)
+    '#7fff7f',                                    // 0 to 10°C (cold - light green)
+    '#ffff00',                                    // 10 to 20°C (cool - yellow)
+    '#ff7f00',                                    // 20 to 30°C (warm - orange)
+    '#ff0000', '#7f0000'                          // 30 to 50°C (hot - red)
+  ]).domain([-40, 50]).mode('lab');
+
+  // Function to map Kelvin to absolute color
+  const getAbsoluteColor = (kelvin) => {{
+    const celsius = kelvin - 273.15;
+    return absoluteColorScale(celsius).hex();
+  }};
 
   // Load continent bounds
   fetch(API + '/continents')
@@ -88,34 +126,52 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
     .then(data => {{ continentBounds = data; }})
     .catch(e => console.error('Failed to load continent bounds:', e));
 
-  window.loadRaster = function(rasterUrl, colorscaleUrl, date, dateRangeObj, continent) {{
+  window.loadRaster = function(rasterUrl, colorscaleUrl, date, dateRangeObj, continent, tempType) {{
     currentDate = date;
+    currentTempType = tempType || "mean";
     dateRange = dateRangeObj || null;
     document.getElementById('loading').style.display = 'block';
+
+    // Clear any existing layer before loading new one
+    if (currentLayer) {{
+      try {{
+        map.removeLayer(currentLayer);
+      }} catch(e) {{
+        console.warn('Error removing previous layer:', e);
+      }}
+      currentLayer = null;
+    }}
 
     fetch(colorscaleUrl)
       .then(r => r.json())
       .then(meta => {{
         vmin = meta.min_value;
         vmax = meta.max_value;
-        document.getElementById('leg-min').textContent = vmin.toFixed(1);
-        document.getElementById('leg-max').textContent = vmax.toFixed(1);
-        document.getElementById('leg-units').textContent = meta.units || '';
+        document.getElementById('leg-min').textContent = (vmin - 273.15).toFixed(1) + '°C';
+        document.getElementById('leg-max').textContent = (vmax - 273.15).toFixed(1) + '°C';
+        document.getElementById('leg-units').textContent = 'Absolute Scale';
         document.getElementById('leg-title').textContent = 'Temperature';
         return fetch(rasterUrl);
       }})
       .then(r => r.arrayBuffer())
       .then(ab => parseGeoraster(ab))
       .then(georaster => {{
-        if (currentLayer) map.removeLayer(currentLayer);
+        // Double-check no layer exists before adding new one
+        if (currentLayer) {{
+          try {{
+            map.removeLayer(currentLayer);
+          }} catch(e) {{
+            console.warn('Error removing layer before adding new one:', e);
+          }}
+        }}
+        
         currentLayer = new GeoRasterLayer({{
           georaster,
           opacity: 0.45,
           pixelValuesToColorFn: values => {{
             const v = values[0];
             if (v == null || isNaN(v)) return null;
-            const norm = Math.min(1, Math.max(0, (v - vmin) / (vmax - vmin)));
-            return colorScale(norm).hex();
+            return getAbsoluteColor(v);
           }},
           resolution: 256,
         }});
@@ -149,7 +205,7 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
     
     console.log('Fetching value for:', currentDate, 'at', lat, lon);
     
-    fetch(`${{API}}/value?date_str=${{currentDate}}&lat=${{lat}}&lon=${{lon}}`)
+    fetch(`${{API}}/value?date_str=${{currentDate}}&lat=${{lat}}&lon=${{lon}}&temp_type=${{currentTempType}}`)
       .then(r => {{
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
@@ -178,7 +234,7 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
 
   window.addEventListener('message', e => {{
     if (e.data && e.data.type === 'loadRaster') {{
-      window.loadRaster(e.data.rasterUrl, e.data.colorscaleUrl, e.data.date, e.data.dateRange, e.data.continent);
+      window.loadRaster(e.data.rasterUrl, e.data.colorscaleUrl, e.data.date, e.data.dateRange, e.data.continent, e.data.tempType);
     }}
     if (e.data && e.data.type === 'setView') {{
       map.setView(e.data.center, e.data.zoom);

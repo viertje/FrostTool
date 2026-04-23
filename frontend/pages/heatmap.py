@@ -44,7 +44,7 @@ def load_initial_map(_: str) -> str:
 clientside_callback(
     """
     function(trigger_data) {
-        if (!trigger_data) return;
+        if (!trigger_data) return dash_clientside.no_update;
         const iframe = document.querySelector('#map-frame');
         if (iframe && iframe.contentWindow) {
             iframe.contentWindow.postMessage({
@@ -53,10 +53,11 @@ clientside_callback(
                 colorscaleUrl: trigger_data.colorscaleUrl,
                 date: trigger_data.date,
                 dateRange: trigger_data.dateRange,
-                continent: trigger_data.continent
+                continent: trigger_data.continent,
+                tempType: trigger_data.tempType
             }, '*');
         }
-        return undefined;
+        return dash_clientside.no_update;
     }
     """,
     Output("_map-update-trigger", "data"),

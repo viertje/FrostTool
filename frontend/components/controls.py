@@ -38,7 +38,7 @@ def create_controls() -> dbc.Col:
             dcc.Dropdown(
                 id="continent-selector",
                 options=[
-                    {"label": "🌍 Global", "value": ""},
+                    {"label": "Global", "value": ""},
                     {"label": "Africa", "value": "Africa"},
                     {"label": "North America", "value": "North America"},
                     {"label": "South America", "value": "South America"},
@@ -51,6 +51,19 @@ def create_controls() -> dbc.Col:
                 style={"width": "100%", "marginBottom": "12px"},
             ),
             dcc.Store(id="selected-continent", data=None),
+            html.Hr(style={"borderColor": "#3C8361", "margin": "22px 0"}),
+            html.H6("TEMPERATURE TYPE", style=label_style),
+            dcc.Dropdown(
+                id="temp-type-selector",
+                options=[
+                    {"label": "Mean (24h)", "value": "mean"},
+                    {"label": "Minimum (24h)", "value": "min"},
+                ],
+                value="mean",
+                clearable=False,
+                style={"width": "100%", "marginBottom": "12px"},
+            ),
+            dcc.Store(id="selected-temp-type", data="mean"),
             html.Hr(style={"borderColor": "#3C8361", "margin": "22px 0"}),
             html.H6("DATE RANGE", style=label_style),
             dcc.DatePickerRange(

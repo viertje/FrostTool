@@ -29,6 +29,7 @@ def show_date_status(start_date: str | None, end_date: str | None) -> str:
     State("date-range", "start_date"),
     State("date-range", "end_date"),
     State("selected-continent", "data"),
+    State("selected-temp-type", "data"),
     prevent_initial_call=True,
 )
 def render_heatmap(
@@ -36,6 +37,7 @@ def render_heatmap(
     start_date: str | None,
     end_date: str | None,
     selected_continent: str | None,
+    selected_temp_type: str | None,
 ) -> tuple:
     if not start_date or not end_date:
         return (
@@ -66,14 +68,17 @@ def render_heatmap(
             dash.no_update,
         )
 
+    temp_type = selected_temp_type or "mean"
+
     try:
-        colorscale_url: str = f"{API}/colorscale?date_str={d_start_str}"
-        raster_url: str = f"{API}/raster?date_str={d_start_str}"
+        # Use aggregation (minimum temperature across range) for frost detection
+        colorscale_url: str = f"{API}/colorscale?start_date={d_start_str}&end_date={d_end_str}&agg_type=min&temp_type={temp_type}"
+        raster_url: str = f"{API}/raster?start_date={d_start_str}&end_date={d_end_str}&agg_type=min&temp_type={temp_type}"
         
         if selected_continent:
             raster_url += f"&continent={selected_continent}"
         
-        cs: dict = requests.get(colorscale_url, timeout=20).json()
+        cs: dict = requests.get(colorscale_url, timeout=60).json()
     except Exception as e:
         return (
             [html.Div(f"Backend error: {e}", style={"color": "#e07050"})],
@@ -86,13 +91,17 @@ def render_heatmap(
             dash.no_update,
         )
 
+    temp_type_label = "Minimum (24h)" if temp_type == "min" else "Mean (24h)"
+
     stats: list = [
-        html.Div(f"Date    : {d_start_str}"),
-        html.Div(f"Variable: Temperature_Air_2m_Mean_24h"),
-        html.Div(f"Units   : °C"),
-        html.Div(f"Min     : {cs['min_value'] - 273.15:.3f}"),
-        html.Div(f"Max     : {cs['max_value'] - 273.15:.3f}"),
-        html.Div(f"Mean    : {cs['mean_value'] - 273.15:.3f}"),
+        html.Div(f"Date Range : {d_start_str} to {d_end_str}"),
+        html.Div(f"Days       : {days}"),
+        html.Div(f"Type       : {temp_type_label}"),
+        html.Div(f"Aggregation: Minimum (frost detection)"),
+        html.Div(f"Units      : °C"),
+        html.Div(f"Min        : {cs['min_value'] - 273.15:.3f}"),
+        html.Div(f"Max        : {cs['max_value'] - 273.15:.3f}"),
+        html.Div(f"Mean       : {cs['mean_value'] - 273.15:.3f}"),
     ]
 
     trigger: dict = {
@@ -103,6 +112,7 @@ def render_heatmap(
         if d_start != d_end
         else None,
         "continent": selected_continent,
+        "tempType": temp_type,
     }
     return stats, trigger
 
@@ -114,3 +124,12 @@ def render_heatmap(
 )
 def select_continent(value: str | None) -> str | None:
     return value if value else None
+
+
+@callback(
+    Output("selected-temp-type", "data"),
+    Input("temp-type-selector", "value"),
+    prevent_initial_call=True,
+)
+def select_temp_type(value: str | None) -> str | None:
+    return value if value else "mean"

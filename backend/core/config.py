@@ -1,12 +1,26 @@
 from pathlib import Path
 import os
 
-DATA_ROOT: Path = Path(
-    os.environ.get(
-        "DATA_ROOT", r"C:\Olivier\Terra local\data\AgERA5\tmean_v2"
-    )
-)
-VARIABLE: str = "Temperature_Air_2m_Mean_24h"
+# Temperature data sources configuration
+TEMPERATURE_SOURCES: dict[str, dict[str, Path | str]] = {
+    "mean": {
+        "path": Path(os.environ.get("DATA_ROOT_MEAN", r"C:\Olivier\Terra local\data\AgERA5\tmean_v2")),
+        "variable": "Temperature_Air_2m_Mean_24h",
+        "label": "Mean (24h)",
+    },
+    "min": {
+        "path": Path(os.environ.get("DATA_ROOT_MIN", r"C:\Olivier\Terra local\data\AgERA5\tmin_v2")),
+        "variable": "Temperature_Air_2m_Min_24h",
+        "label": "Minimum (24h)",
+    },
+}
+
+# Default to mean, but can be overridden
+DEFAULT_TEMP_TYPE: str = "mean"
+
+# Legacy support
+DATA_ROOT: Path = TEMPERATURE_SOURCES[DEFAULT_TEMP_TYPE]["path"]
+VARIABLE: str = TEMPERATURE_SOURCES[DEFAULT_TEMP_TYPE]["variable"]
 
 CONTINENTS: dict[str, tuple[float, float, float, float]] = {
     "Africa": (-35, 37, -18, 52),

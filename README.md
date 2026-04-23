@@ -9,7 +9,7 @@ uvicorn backend.main:app --reload
 Frontend:
 
 ```bash
-python frontend/app.py
+python -m frontend.app
 ```
 
 # NC Temperature Heatmap

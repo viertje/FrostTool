@@ -238,10 +238,33 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
       console.warn('No date selected. Please render a heatmap first.');
       return;
     }}
-    const lat = e.latlng.lat.toFixed(4);
-    const lon = e.latlng.lng.toFixed(4);
+    let lat = e.latlng.lat;
+    let lon = e.latlng.lng;
+    
+    // Normalize longitude to [-180, 180] range (handle wrapped map)
+    lon = ((lon + 180) % 360 - 180);
+    
+    lat = lat.toFixed(4);
+    lon = lon.toFixed(4);
     
     console.log('Fetching value for:', currentDate, 'at', lat, lon);
+    
+    // Store clicked coordinate and send to parent
+    window.lastClickedCoordinate = {{
+      lat: parseFloat(lat),
+      lon: parseFloat(lon),
+      date: currentDate,
+      dateRange: dateRange,
+    }};
+    
+    // Send to parent Dash app via postMessage
+    window.parent.postMessage({{
+      type: 'coordinateClicked',
+      lat: parseFloat(lat),
+      lon: parseFloat(lon),
+      date: currentDate,
+      dateRange: dateRange,
+    }}, '*');
     
     fetch(`${{API}}/value?date_str=${{currentDate}}&lat=${{lat}}&lon=${{lon}}&temp_type=${{currentTempType}}`)
       .then(r => {{

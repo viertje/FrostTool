@@ -9,6 +9,8 @@ from backend.models.schemas import (
     AvailableDatesResponse,
     ColorscaleResponse,
     CellValueResponse,
+    TimeseriesResponse,
+    TimeseriesDataPoint,
 )
 from backend.core.exceptions import (
     DatasetNotFoundError,
@@ -125,6 +127,45 @@ async def get_cell_value(
         return CellValueResponse(value=value, lat=lat, lon=lon, date=date_str)
     except DatasetNotFoundError:
         raise HTTPException(status_code=404, detail=f"No data for date {date_str}")
+    except (ValueError, VariableNotFoundError, InvalidTimeIndexError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/timeseries", response_model=TimeseriesResponse)
+async def get_timeseries(
+    start_date: str = Query(..., description="Range start in YYYY-MM-DD format"),
+    end_date: str = Query(..., description="Range end in YYYY-MM-DD format"),
+    lat: float = Query(..., ge=-90, le=90),
+    lon: float = Query(..., ge=-180, le=180),
+    temp_type: str = Query("mean", description="Temperature type: mean or min"),
+    service: NetCDFService = Depends(get_netcdf_service),
+) -> TimeseriesResponse:
+    """Get temperature time series for a specific coordinate across a date range."""
+    try:
+        start_obj: date = date.fromisoformat(start_date)
+        end_obj: date = date.fromisoformat(end_date)
+        
+        timeseries_data: list[tuple[date, float]] = service.get_cell_timeseries(
+            start_obj, end_obj, lat, lon, temp_type=temp_type
+        )
+        
+        data_points = [
+            TimeseriesDataPoint(date=d.isoformat(), value=v)
+            for d, v in timeseries_data
+        ]
+        
+        return TimeseriesResponse(
+            lat=lat,
+            lon=lon,
+            start_date=start_date,
+            end_date=end_date,
+            data=data_points,
+            units="K",
+        )
+    except DatasetNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No data for date range {start_date} to {end_date}")
     except (ValueError, VariableNotFoundError, InvalidTimeIndexError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:

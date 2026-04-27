@@ -19,5 +19,19 @@ class CellValueResponse(BaseModel):
     date: str
 
 
+class TimeseriesDataPoint(BaseModel):
+    date: str
+    value: float
+
+
+class TimeseriesResponse(BaseModel):
+    lat: float
+    lon: float
+    start_date: str
+    end_date: str
+    data: list[TimeseriesDataPoint]
+    units: str
+
+
 class HealthResponse(BaseModel):
     status: str

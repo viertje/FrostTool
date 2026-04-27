@@ -243,6 +243,45 @@ class NetCDFService:
         return float(value)
 
     @staticmethod
+    def get_cell_timeseries(
+        start_date: date,
+        end_date: date,
+        lat: float,
+        lon: float,
+        time_index: int = 0,
+        temp_type: str = "mean",
+    ) -> list[tuple[date, float]]:
+        """Get temperature time series for a specific coordinate across a date range.
+        
+        Returns:
+            List of (date, temperature_value) tuples in Kelvin
+        """
+        date_data_pairs = NetCDFService.get_temperature_slice_range(
+            start_date, end_date, time_index, temp_type
+        )
+        
+        timeseries: list[tuple[date, float]] = []
+        
+        for date_obj, data in date_data_pairs:
+            # Calculate indices the same way as get_cell_value
+            lat_idx: int = int((90 - lat) * (data.shape[0] - 1) / 180)
+            lon_idx: int = int((lon + 180) * (data.shape[1] - 1) / 360)
+            
+            lat_idx = max(0, min(lat_idx, data.shape[0] - 1))
+            lon_idx = max(0, min(lon_idx, data.shape[1] - 1))
+            
+            value = data[lat_idx, lon_idx]
+            
+            # Skip NaN values but don't fail
+            if not np.isnan(value):
+                timeseries.append((date_obj, float(value)))
+        
+        if not timeseries:
+            raise ValueError(f"No valid data available at lat={lat}, lon={lon} for the date range")
+        
+        return timeseries
+
+    @staticmethod
     def get_available_dates(temp_type: str = "mean") -> list[str]:
         data_root = _get_data_root(temp_type)
         dates: list[str] = []
@@ -338,14 +377,16 @@ class NetCDFService:
         stacked = np.stack(grids, axis=0)  # (time, lat, lon)
         
         # Aggregate along time axis
-        if aggregation == "min":
-            result = np.nanmin(stacked, axis=0)
-        elif aggregation == "max":
-            result = np.nanmax(stacked, axis=0)
-        elif aggregation == "mean":
-            result = np.nanmean(stacked, axis=0)
-        else:
-            raise ValueError(f"Unknown aggregation: {aggregation}")
+        # Use errstate to suppress all-NaN slice warnings (benign — nanmin/nanmax handle NaNs correctly)
+        with np.errstate(all="ignore"):
+            if aggregation == "min":
+                result = np.nanmin(stacked, axis=0)
+            elif aggregation == "max":
+                result = np.nanmax(stacked, axis=0)
+            elif aggregation == "mean":
+                result = np.nanmean(stacked, axis=0)
+            else:
+                raise ValueError(f"Unknown aggregation: {aggregation}")
         
         result = result.astype(np.float32)
         

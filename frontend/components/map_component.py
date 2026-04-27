@@ -103,6 +103,7 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
   let currentTempType = "mean";
   let vmin = 0, vmax = 1;
   let continentBounds = {{}};
+  let isLoading = false;
 
   // Absolute temperature color scale (Celsius to color mapping)
   // -40°C to 50°C range
@@ -127,22 +128,28 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
     .catch(e => console.error('Failed to load continent bounds:', e));
 
   window.loadRaster = function(rasterUrl, colorscaleUrl, date, dateRangeObj, continent, tempType) {{
+    // Prevent multiple simultaneous loads
+    if (isLoading) {{
+      console.warn('Raster already loading, ignoring new request');
+      return;
+    }}
+    
+    isLoading = true;
     currentDate = date;
     currentTempType = tempType || "mean";
     dateRange = dateRangeObj || null;
     document.getElementById('loading').style.display = 'block';
 
-    // Clear any existing layer before loading new one
-    if (currentLayer) {{
-      try {{
-        map.removeLayer(currentLayer);
-      }} catch(e) {{
-        console.warn('Error removing previous layer:', e);
-      }}
-      currentLayer = null;
-    }}
+    // Keep reference to old layer to ensure cleanup
+    const previousLayer = currentLayer;
+    currentLayer = null;
 
-    fetch(colorscaleUrl)
+    // Add cache-busting parameter to prevent tile caching at different zoom levels
+    const cacheBuster = '&_cache=' + Date.now();
+    const bustColorscaleUrl = colorscaleUrl + cacheBuster;
+    const bustRasterUrl = rasterUrl + cacheBuster;
+
+    fetch(bustColorscaleUrl)
       .then(r => r.json())
       .then(meta => {{
         vmin = meta.min_value;
@@ -151,20 +158,28 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
         document.getElementById('leg-max').textContent = (vmax - 273.15).toFixed(1) + '°C';
         document.getElementById('leg-units').textContent = 'Absolute Scale';
         document.getElementById('leg-title').textContent = 'Temperature';
-        return fetch(rasterUrl);
+        return fetch(bustRasterUrl);
       }})
       .then(r => r.arrayBuffer())
       .then(ab => parseGeoraster(ab))
       .then(georaster => {{
-        // Double-check no layer exists before adding new one
-        if (currentLayer) {{
+        // Remove previous layer and clear all cached tile references
+        if (previousLayer) {{
           try {{
-            map.removeLayer(currentLayer);
+            // Remove all tile containers and canvas elements from previous layer
+            map.removeLayer(previousLayer);
+            
+            // Force garbage collection of old layer references
+            previousLayer._container = null;
+            previousLayer._image = null;
+            
+            console.log('Previous layer removed successfully');
           }} catch(e) {{
-            console.warn('Error removing layer before adding new one:', e);
+            console.error('Error removing previous layer:', e);
           }}
         }}
         
+        // Create and add new layer
         currentLayer = new GeoRasterLayer({{
           georaster,
           opacity: 0.45,
@@ -175,7 +190,17 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
           }},
           resolution: 256,
         }});
+        
         currentLayer.addTo(map);
+        console.log('New layer added to map');
+        
+        // Force the map to completely invalidate and redraw all tiles
+        map.invalidateSize(false);
+        
+        // Trigger a redraw at the current zoom level to ensure new tiles are fetched
+        setTimeout(() => {{
+          map._resetView(map.getCenter(), map.getZoom());
+        }}, 50);
         
         // Zoom to continent bounds if continent is selected, else fit layer bounds
         if (continent && continentBounds[continent]) {{
@@ -186,10 +211,23 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
         }}
         
         document.getElementById('loading').style.display = 'none';
+        isLoading = false;
       }})
       .catch(e => {{
         console.error('Raster load error:', e);
         document.getElementById('loading').style.display = 'none';
+        isLoading = false;
+        
+        // If new layer failed to load, restore previous state for visibility
+        if (previousLayer && !currentLayer) {{
+          try {{
+            currentLayer = previousLayer;
+            map.addLayer(previousLayer);
+            console.log('Restored previous layer due to error');
+          }} catch(restoreErr) {{
+            console.error('Could not restore previous layer:', restoreErr);
+          }}
+        }}
       }});
   }};
 
@@ -248,3 +286,54 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
 
 def get_map_html(api_url: str) -> str:
     return MAP_HTML_TEMPLATE.format(api_url=api_url)
+
+
+def get_map_html_with_initial_raster(
+    api_url: str,
+    raster_url: str,
+    colorscale_url: str,
+    date: str,
+    continent: str | None,
+    temp_type: str,
+) -> str:
+    """Generate map HTML that auto-loads a raster on iframe creation.
+    
+    This replaces the entire iframe content, forcing a complete reset of:
+    - All JavaScript variables and state
+    - Leaflet's internal cache
+    - Browser HTTP cache
+    - DOM cache
+    
+    This is equivalent to a hard refresh (Ctrl+Shift+R).
+    """
+    import json
+    
+    base_html = MAP_HTML_TEMPLATE.format(api_url=api_url)
+    
+    # Properly escape and JSON-encode parameters
+    raster_url_safe = json.dumps(raster_url)
+    colorscale_url_safe = json.dumps(colorscale_url)
+    date_safe = json.dumps(date)
+    continent_safe = json.dumps(continent) if continent else "null"
+    temp_type_safe = json.dumps(temp_type)
+    
+    # Inject auto-load script at the end, just before closing body tag
+    auto_load_script = f"""
+<script>
+// Auto-load raster immediately after page loads (fresh iframe)
+window.addEventListener('load', function() {{
+    setTimeout(function() {{
+        window.loadRaster(
+            {raster_url_safe},
+            {colorscale_url_safe},
+            {date_safe},
+            null,
+            {continent_safe},
+            {temp_type_safe}
+        );
+    }}, 100);
+}});
+</script>
+"""
+    
+    return base_html.replace("</body>", auto_load_script + "</body>")

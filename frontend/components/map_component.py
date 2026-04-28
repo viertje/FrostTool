@@ -1,11 +1,13 @@
-API: str = "http://localhost:8000/api/v1"
+from frontend.config import API_BASE_URL
+
+API: str = API_BASE_URL
 
 MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css"/>
 <style>
   *{{margin:0;padding:0;box-sizing:border-box;}}
   html,body,#map{{width:100%;height:100%;background:#1B6758;}}
@@ -82,14 +84,17 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
   <div class="loading-text">LOADING RASTER</div>
 </div>
 
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://unpkg.com/georaster@1.6.0/dist/georaster.browser.bundle.min.js"></script>
-<script src="https://unpkg.com/georaster-layer-for-leaflet/dist/georaster-layer-for-leaflet.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chroma-js@2.4.2/chroma.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4"></script>
+<script src="https://cdn.jsdelivr.net/npm/georaster@1.6.0"></script>
+<script src="https://cdn.jsdelivr.net/npm/georaster-layer-for-leaflet"></script>
+<script src="https://cdn.jsdelivr.net/npm/chroma-js@2.4.2"></script>
 
 <script>
 (function () {{
   const API = '{api_url}';
+  const DEBUG = false; // Set to true for verbose logging
+  const log = (msg, ...args) => {{ if (DEBUG) console.log(msg, ...args); }};
+  
   const map = L.map('map', {{ center:[20,0], zoom:2, zoomControl:true }});
   
   L.tileLayer(
@@ -123,9 +128,20 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
 
   // Load continent bounds
   fetch(API + '/continents')
-    .then(r => r.json())
-    .then(data => {{ continentBounds = data; }})
-    .catch(e => console.error('Failed to load continent bounds:', e));
+    .then(r => {{
+      if (!r.ok) {{
+        console.error('Continent bounds fetch failed with status:', r.status);
+        return {{}};
+      }}
+      return r.json();
+    }})
+    .then(data => {{
+      continentBounds = data || {{}};
+    }})
+    .catch(e => {{
+      console.error('Failed to load continent bounds:', e);
+      continentBounds = {{}};
+    }});
 
   window.loadRaster = function(rasterUrl, colorscaleUrl, date, dateRangeObj, continent, tempType) {{
     // Prevent multiple simultaneous loads
@@ -150,8 +166,16 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
     const bustRasterUrl = rasterUrl + cacheBuster;
 
     fetch(bustColorscaleUrl)
-      .then(r => r.json())
+      .then(r => {{
+        if (!r.ok) {{
+          throw new Error(`HTTP ${{r.status}}: Failed to fetch colorscale`);
+        }}
+        return r.json();
+      }})
       .then(meta => {{
+        if (!meta || !meta.min_value || !meta.max_value) {{
+          throw new Error('Invalid colorscale response format');
+        }}
         vmin = meta.min_value;
         vmax = meta.max_value;
         document.getElementById('leg-min').textContent = (vmin - 273.15).toFixed(1) + '°C';
@@ -160,8 +184,18 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
         document.getElementById('leg-title').textContent = 'Temperature';
         return fetch(bustRasterUrl);
       }})
-      .then(r => r.arrayBuffer())
-      .then(ab => parseGeoraster(ab))
+      .then(r => {{
+        if (!r.ok) {{
+          throw new Error(`HTTP ${{r.status}}: Failed to fetch raster`);
+        }}
+        return r.arrayBuffer();
+      }})
+      .then(ab => {{
+        if (!ab || ab.byteLength === 0) {{
+          throw new Error('Received empty raster data');
+        }}
+        return parseGeoraster(ab);
+      }})
       .then(georaster => {{
         // Remove previous layer and clear all cached tile references
         if (previousLayer) {{
@@ -172,8 +206,6 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
             // Force garbage collection of old layer references
             previousLayer._container = null;
             previousLayer._image = null;
-            
-            console.log('Previous layer removed successfully');
           }} catch(e) {{
             console.error('Error removing previous layer:', e);
           }}
@@ -192,7 +224,6 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
         }});
         
         currentLayer.addTo(map);
-        console.log('New layer added to map');
         
         // Force the map to completely invalidate and redraw all tiles
         map.invalidateSize(false);
@@ -223,7 +254,6 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
           try {{
             currentLayer = previousLayer;
             map.addLayer(previousLayer);
-            console.log('Restored previous layer due to error');
           }} catch(restoreErr) {{
             console.error('Could not restore previous layer:', restoreErr);
           }}
@@ -246,8 +276,6 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
     
     lat = lat.toFixed(4);
     lon = lon.toFixed(4);
-    
-    console.log('Fetching value for:', currentDate, 'at', lat, lon);
     
     // Store clicked coordinate and send to parent
     window.lastClickedCoordinate = {{
@@ -272,7 +300,6 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
         return r.json();
       }})
       .then(d => {{
-        console.log('Received:', d);
         const celsius = (d.value - 273.15).toFixed(2);
         const k = d.value != null ? celsius + ' °C' : '—';
         tooltip.innerHTML =

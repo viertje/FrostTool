@@ -4,6 +4,7 @@ import json
 
 from frontend.components.controls import create_controls, create_header, create_map_frame
 from frontend.components.map_component import get_map_html, get_map_html_with_initial_raster
+from frontend.config import API_BASE_URL
 
 
 def create_layout() -> dbc.Container:
@@ -87,12 +88,9 @@ def create_layout() -> dbc.Container:
 clientside_callback(
     """
     function(n_clicks) {
-        console.log('[INTERMEDIATE] Button clicked, n_clicks=' + n_clicks);
         if (window._lastCoordinate) {
-            console.log('[INTERMEDIATE] Updating store with:', window._lastCoordinate);
             return window._lastCoordinate;
         }
-        console.log('[INTERMEDIATE] No coordinate in window');
         return undefined;
     }
     """,
@@ -118,31 +116,29 @@ def sync_coordinate_to_final_store(intermediate_data: dict | None) -> dict | Non
 clientside_callback(
     """
     function() {
-        console.log('[SETUP] Setting up postMessage listener');
         if (window._messageListenerSetup) {
-            console.log('[SETUP] Listener already setup');
             return '';
         }
         window._messageListenerSetup = true;
         
         window.addEventListener('message', function(e) {
-            console.log('[LISTENER] Received message:', e.data);
-            if (e.data && e.data.type === 'coordinateClicked') {
-                console.log('[LISTENER] Processing coordinateClicked');
-                // Store the coordinate in window
-                window._lastCoordinate = {
-                    lat: e.data.lat,
-                    lon: e.data.lon,
-                    date: e.data.date,
-                    dateRange: e.data.dateRange,
-                };
-                console.log('[LISTENER] Stored coordinate, clicking trigger');
-                // Trigger the hidden button to signal coordinate change
-                const btn = document.getElementById('coordinate-trigger');
-                if (btn) {
-                    btn.click();
-                    console.log('[LISTENER] Clicked trigger button');
+            try {
+                if (e.data && e.data.type === 'coordinateClicked') {
+                    // Store the coordinate in window
+                    window._lastCoordinate = {
+                        lat: e.data.lat,
+                        lon: e.data.lon,
+                        date: e.data.date,
+                        dateRange: e.data.dateRange,
+                    };
+                    // Trigger the hidden button to signal coordinate change
+                    const btn = document.getElementById('coordinate-trigger');
+                    if (btn) {
+                        btn.click();
+                    }
                 }
+            } catch (err) {
+                console.error('Error processing postMessage:', err);
             }
         });
         return '';
@@ -161,7 +157,7 @@ clientside_callback(
     Input("close-graph-btn", "n_clicks"),
     prevent_initial_call=True,
 )
-def toggle_graph_visibility(clicked_data: dict | None, close_clicks: int) -> dict:
+def toggle_graph_visibility(clicked_data: dict | None, close_clicks: int | None) -> dict:
     """Show graph container when coordinate is clicked, hide when close button is pressed."""
     base_style = {
         "borderTop": "1px solid #3C8361",
@@ -173,7 +169,9 @@ def toggle_graph_visibility(clicked_data: dict | None, close_clicks: int) -> dic
     }
     
     # Check which input triggered this callback
-    trigger_id = callback_context.triggered[0]["prop_id"].split(".")[0] if callback_context.triggered else None
+    trigger_id = None
+    if callback_context.triggered:
+        trigger_id = callback_context.triggered[0]["prop_id"].split(".")[0]
     
     if trigger_id == "close-graph-btn":
         # Close button was clicked - hide the graph
@@ -211,10 +209,10 @@ def update_map(map_frame_id: str, trigger_data: dict | None) -> str:
     if ctx.triggered and ctx.triggered[0]["prop_id"].startswith("raster-trigger"):
         # Raster-trigger changed: regenerate iframe with data
         if not trigger_data:
-            return get_map_html("http://localhost:8000/api/v1")
+            return get_map_html(API_BASE_URL)
         
         return get_map_html_with_initial_raster(
-            api_url="http://localhost:8000/api/v1",
+            api_url=API_BASE_URL,
             raster_url=trigger_data.get("rasterUrl"),
             colorscale_url=trigger_data.get("colorscaleUrl"),
             date=trigger_data.get("date"),
@@ -223,4 +221,4 @@ def update_map(map_frame_id: str, trigger_data: dict | None) -> str:
         )
     
     # Initial load: return empty map
-    return get_map_html("http://localhost:8000/api/v1")
+    return get_map_html(API_BASE_URL)

@@ -1,9 +1,17 @@
 import logging
+import sys
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api.routes.climate import router as climate_router
+# Handle imports for both direct execution and module invocation
+try:
+    from .api.routes.climate import router as climate_router
+except ImportError:
+    # Add parent directory to path for direct execution
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from backend.api.routes.climate import router as climate_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

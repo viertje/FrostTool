@@ -152,6 +152,7 @@ class NetCDFService:
         time_index: int = 0,
         temp_type: str = "mean",
         continent: str | None = None,
+        zoom_level: int | None = None,
     ) -> bytes:
         data: np.ndarray = NetCDFService.get_temperature_slice(
             date_obj, time_index, temp_type
@@ -166,7 +167,7 @@ class NetCDFService:
             # Global view: exclude Antarctica (south of -60)
             min_lat, max_lat, min_lon, max_lon = -60, 90, -180, 180
         
-        # Clip data to bounds
+        # Clip data to bounds FIRST (before downsampling)
         # In GeoTIFF: row 0 = lat 90 (north), row lat_size-1 = lat -90 (south)
         lat_indices = np.linspace(90, -90, lat_size)
         lon_indices = np.linspace(-180, 180, lon_size)
@@ -195,6 +196,20 @@ class NetCDFService:
             new_min_lat = lat_indices[row_end - 1]
             new_min_lon = lon_indices[col_start]
             new_max_lon = lon_indices[col_end - 1]
+        
+        # Apply zoom-based downsampling AFTER clipping (to avoid misalignment)
+        if zoom_level is not None:
+            if zoom_level < 4:
+                # Global view: downsample 4x
+                downsample_factor = 4
+                clipped_data = clipped_data[::downsample_factor, ::downsample_factor]
+                logger.debug(f"Downsampled clipped data 4x for zoom {zoom_level}")
+            elif zoom_level < 8:
+                # Continental view: downsample 2x
+                downsample_factor = 2
+                clipped_data = clipped_data[::downsample_factor, ::downsample_factor]
+                logger.debug(f"Downsampled clipped data 2x for zoom {zoom_level}")
+            # else: zoom >= 8, use full resolution
         
         clipped_lat_size, clipped_lon_size = clipped_data.shape
         transform = from_bounds(new_min_lon, new_min_lat, new_max_lon, new_max_lat, clipped_lon_size, clipped_lat_size)
@@ -362,6 +377,7 @@ class NetCDFService:
         time_index: int = 0,
         temp_type: str = "mean",
         continent: str | None = None,
+        zoom_level: int | None = None,
     ) -> bytes:
         """Get aggregated raster across a date range (min, max, or mean)."""
         # Load all dates in parallel
@@ -390,7 +406,7 @@ class NetCDFService:
         
         result = result.astype(np.float32)
         
-        # Clip to bounds (same as get_raster_bytes)
+        # Clip to bounds FIRST (before downsampling)
         lat_size, lon_size = result.shape
         
         if continent and continent in CONTINENTS:
@@ -421,6 +437,20 @@ class NetCDFService:
             new_min_lat = lat_indices[row_end - 1]
             new_min_lon = lon_indices[col_start]
             new_max_lon = lon_indices[col_end - 1]
+        
+        # Apply zoom-based downsampling AFTER clipping (to avoid misalignment)
+        if zoom_level is not None:
+            if zoom_level < 4:
+                # Global view: downsample 4x
+                downsample_factor = 4
+                clipped_data = clipped_data[::downsample_factor, ::downsample_factor]
+                logger.debug(f"Downsampled clipped aggregated data 4x for zoom {zoom_level}")
+            elif zoom_level < 8:
+                # Continental view: downsample 2x
+                downsample_factor = 2
+                clipped_data = clipped_data[::downsample_factor, ::downsample_factor]
+                logger.debug(f"Downsampled clipped aggregated data 2x for zoom {zoom_level}")
+            # else: zoom >= 8, use full resolution
         
         clipped_lat_size, clipped_lon_size = clipped_data.shape
         transform = from_bounds(new_min_lon, new_min_lat, new_max_lon, new_max_lat, clipped_lon_size, clipped_lat_size)

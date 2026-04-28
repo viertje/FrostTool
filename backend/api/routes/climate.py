@@ -42,6 +42,7 @@ async def get_raster(
     agg_type: str = Query("min", description="Aggregation type: min, max, or mean"),
     temp_type: str = Query("mean", description="Temperature type: mean or min"),
     continent: str | None = Query(None, description="Optional continent name"),
+    zoom_level: int | None = Query(None, ge=0, le=19, description="Map zoom level (0-19) for adaptive resolution"),
     service: NetCDFService = Depends(get_netcdf_service),
 ) -> StreamingResponse:
     try:
@@ -54,13 +55,15 @@ async def get_raster(
                 raise ValueError(f"Invalid aggregation type: {agg_type}")
             
             raster_bytes: bytes = service.get_raster_bytes_aggregated(
-                start_obj, end_obj, agg_type, temp_type=temp_type, continent=continent
+                start_obj, end_obj, agg_type, temp_type=temp_type, continent=continent, zoom_level=zoom_level
             )
             filename = f"{start_date}_to_{end_date}_{agg_type}.tif"
         elif date_str:
             # Single date
             date_obj: date = date.fromisoformat(date_str)
-            raster_bytes: bytes = service.get_raster_bytes(date_obj, temp_type=temp_type, continent=continent)
+            raster_bytes: bytes = service.get_raster_bytes(
+                date_obj, temp_type=temp_type, continent=continent, zoom_level=zoom_level
+            )
             filename = f"{date_str}.tif"
         else:
             raise ValueError("Either date_str or (start_date and end_date) must be provided")

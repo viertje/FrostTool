@@ -109,7 +109,9 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
   let vmin = 0, vmax = 1;
   let continentBounds = {{}};
   let isLoading = false;
-
+  let lastFetchedZoomLevel = null;  // Track zoom level used for last fetch
+  let rasterUrls = {{}};  // Store current URLs for re-fetching on zoom
+  let currentContinent = null;
   // Absolute temperature color scale (Celsius to color mapping)
   // -40°C to 50°C range
   const absoluteColorScale = chroma.scale([
@@ -160,10 +162,14 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
     const previousLayer = currentLayer;
     currentLayer = null;
 
+    // Get current zoom level and add to URL for adaptive resolution
+    const currentZoom = map.getZoom();
+    const zoomParam = '&zoom_level=' + currentZoom;
+
     // Add cache-busting parameter to prevent tile caching at different zoom levels
     const cacheBuster = '&_cache=' + Date.now();
     const bustColorscaleUrl = colorscaleUrl + cacheBuster;
-    const bustRasterUrl = rasterUrl + cacheBuster;
+    const bustRasterUrl = rasterUrl + zoomParam + cacheBuster;
 
     fetch(bustColorscaleUrl)
       .then(r => {{
@@ -197,15 +203,10 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
         return parseGeoraster(ab);
       }})
       .then(georaster => {{
-        // Remove previous layer and clear all cached tile references
+        // Remove previous layer
         if (previousLayer) {{
           try {{
-            // Remove all tile containers and canvas elements from previous layer
             map.removeLayer(previousLayer);
-            
-            // Force garbage collection of old layer references
-            previousLayer._container = null;
-            previousLayer._image = null;
           }} catch(e) {{
             console.error('Error removing previous layer:', e);
           }}
@@ -225,21 +226,22 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
         
         currentLayer.addTo(map);
         
-        // Force the map to completely invalidate and redraw all tiles
-        map.invalidateSize(false);
-        
-        // Trigger a redraw at the current zoom level to ensure new tiles are fetched
-        setTimeout(() => {{
-          map._resetView(map.getCenter(), map.getZoom());
-        }}, 50);
-        
-        // Zoom to continent bounds if continent is selected, else fit layer bounds
-        if (continent && continentBounds[continent]) {{
-          const b = continentBounds[continent].bounds;
-          map.fitBounds([[b.min_lat, b.min_lon], [b.max_lat, b.max_lon]]);
-        }} else {{
-          map.fitBounds(currentLayer.getBounds());
+        // Only zoom to bounds on initial load, not on zoom-triggered re-fetches
+        const isInitialLoad = lastFetchedZoomLevel === null;
+        if (isInitialLoad) {{
+          if (continent && continentBounds[continent]) {{
+            const b = continentBounds[continent].bounds;
+            map.fitBounds([[b.min_lat, b.min_lon], [b.max_lat, b.max_lon]]);
+          }} else {{
+            map.fitBounds(currentLayer.getBounds());
+          }}
         }}
+        
+        // Track URLs and zoom level for zoom-based re-fetching
+        rasterUrls.rasterUrl = rasterUrl;
+        rasterUrls.colorscaleUrl = colorscaleUrl;
+        currentContinent = continent;
+        lastFetchedZoomLevel = currentZoom;
         
         document.getElementById('loading').style.display = 'none';
         isLoading = false;
@@ -319,6 +321,45 @@ MAP_HTML_TEMPLATE: str = """<!DOCTYPE html>
   }});
 
   map.on('mouseout', () => {{ tooltip.style.display = 'none'; }});
+
+  // Zoom event listener: re-fetch at appropriate resolution when zoom level crosses thresholds
+  map.on('zoomend', function() {{
+    if (!currentDate || !rasterUrls.rasterUrl) return;
+    
+    const newZoom = map.getZoom();
+    
+    // Determine if we need to fetch at different resolution
+    // Thresholds: zoom < 4 (4x down), zoom 4-7 (2x down), zoom >= 8 (full)
+    let shouldRefetch = false;
+    
+    if (lastFetchedZoomLevel === null) {{
+      shouldRefetch = true;
+    }} else if (lastFetchedZoomLevel < 4 && newZoom >= 4) {{
+      // Zooming in: was downsampled 4x, now need 2x or full
+      shouldRefetch = true;
+    }} else if (lastFetchedZoomLevel < 8 && newZoom >= 8) {{
+      // Zooming in: was downsampled, now need full resolution
+      shouldRefetch = true;
+    }} else if (lastFetchedZoomLevel >= 8 && newZoom < 8) {{
+      // Zooming out: was full resolution, now need downsampled - MUST refetch for proper bounds
+      shouldRefetch = true;
+    }} else if (lastFetchedZoomLevel >= 4 && newZoom < 4) {{
+      // Zooming out: was 2x downsampled, now need 4x downsampled
+      shouldRefetch = true;
+    }}
+    
+    if (shouldRefetch && !isLoading) {{
+      log('Zoom threshold crossed (' + lastFetchedZoomLevel + ' -> ' + newZoom + '): re-fetching with new resolution');
+      window.loadRaster(
+        rasterUrls.rasterUrl,
+        rasterUrls.colorscaleUrl,
+        currentDate,
+        dateRange,
+        currentContinent,
+        currentTempType
+      );
+    }}
+  }});
 
   window.addEventListener('message', e => {{
     if (e.data && e.data.type === 'loadRaster') {{

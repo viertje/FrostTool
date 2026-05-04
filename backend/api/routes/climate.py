@@ -4,11 +4,15 @@ from fastapi import APIRouter, Query, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 
 from backend.api.dependencies import get_netcdf_service
+from backend.models.domain import ColorscaleInfo
 from backend.services.netcdf_service import NetCDFService
 from backend.models.schemas import (
     AvailableDatesResponse,
     ColorscaleResponse,
     CellValueResponse,
+    ContinentBounds,
+    ContinentDetail,
+    HealthResponse,
     TimeseriesResponse,
     TimeseriesDataPoint,
 )
@@ -34,7 +38,11 @@ async def get_available_dates(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@router.get("/raster")
+@router.get(
+    "/raster",
+    response_class=StreamingResponse,
+    responses={200: {"content": {"image/tiff": {}}, "description": "GeoTIFF raster tile"}},
+)
 async def get_raster(
     date_str: str | None = Query(None, description="Date in YYYY-MM-DD format"),
     start_date: str | None = Query(None, description="Range start in YYYY-MM-DD format (for aggregation)"),
@@ -94,20 +102,25 @@ async def get_colorscale(
         if start_date and end_date:
             start_obj: date = date.fromisoformat(start_date)
             end_obj: date = date.fromisoformat(end_date)
-            
+
             if agg_type not in ("min", "max", "mean"):
                 raise ValueError(f"Invalid aggregation type: {agg_type}")
-            
-            info: dict = service.get_colorscale_info_aggregated(
+
+            info: ColorscaleInfo = service.get_colorscale_info_aggregated(
                 start_obj, end_obj, agg_type, temp_type=temp_type
             )
         elif date_str:
             date_obj: date = date.fromisoformat(date_str)
-            info: dict = service.get_colorscale_info(date_obj, temp_type=temp_type)
+            info = service.get_colorscale_info(date_obj, temp_type=temp_type)
         else:
             raise ValueError("Either date_str or (start_date and end_date) must be provided")
-        
-        return ColorscaleResponse(**info)
+
+        return ColorscaleResponse(
+            min_value=info.min_value,
+            max_value=info.max_value,
+            mean_value=info.mean_value,
+            units=info.units,
+        )
     except DatasetNotFoundError:
         raise HTTPException(status_code=404, detail="No data for the specified date(s)")
     except (ValueError, VariableNotFoundError, InvalidTimeIndexError) as exc:
@@ -175,14 +188,21 @@ async def get_timeseries(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@router.get("/continents")
-async def get_continents() -> dict[str, dict]:
+@router.get("/continents", response_model=dict[str, ContinentDetail])
+async def get_continents() -> dict[str, ContinentDetail]:
     return {
-        name: {"bounds": {"min_lat": bounds[0], "max_lat": bounds[1], "min_lon": bounds[2], "max_lon": bounds[3]}}
+        name: ContinentDetail(
+            bounds=ContinentBounds(
+                min_lat=bounds[0],
+                max_lat=bounds[1],
+                min_lon=bounds[2],
+                max_lon=bounds[3],
+            )
+        )
         for name, bounds in CONTINENTS.items()
     }
 
 
-@router.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+@router.get("/health", response_model=HealthResponse)
+async def health() -> HealthResponse:
+    return HealthResponse(status="ok")

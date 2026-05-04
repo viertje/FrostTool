@@ -35,3 +35,14 @@ class TimeseriesResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
+
+
+class ContinentBounds(BaseModel):
+    min_lat: float
+    max_lat: float
+    min_lon: float
+    max_lon: float
+
+
+class ContinentDetail(BaseModel):
+    bounds: ContinentBounds

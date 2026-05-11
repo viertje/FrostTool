@@ -38,8 +38,29 @@ class CropParams:
     frost_threshold: float
 
 
+@dataclass
+class YearStack:
+    """Europe-clipped tmean/tmin daily stacks for a Jan–May season. Crop-agnostic."""
+
+    tmean_stack: np.ndarray  # (T, lat, lon) Kelvin
+    tmin_stack: np.ndarray   # (T, lat, lon) Kelvin
+    bounds: EuropeBounds
+
+
+_available_years: list[int] | None = None
+
+
 def get_available_gdd_years() -> list[int]:
-    """Return years for which both tmean and tmin season data exist."""
+    """Return years for which both tmean and tmin season data exist.
+
+    Result is cached in memory for the lifetime of the process. Call this once
+    at startup (before the warm-up thread begins disk I/O) to prevent the data-drive
+    glob from blocking the Uvicorn async event loop on subsequent requests.
+    """
+    global _available_years
+    if _available_years is not None:
+        return _available_years
+
     def _year_folders(temp_type: str) -> set[int]:
         root = TEMPERATURE_SOURCES[temp_type]["path"]
         return {
@@ -48,7 +69,8 @@ def get_available_gdd_years() -> list[int]:
             if p.is_dir() and p.name.isdigit()
         }
 
-    return sorted(_year_folders("mean") & _year_folders("min"))
+    _available_years = sorted(_year_folders("mean") & _year_folders("min"))
+    return _available_years
 
 
 def load_crops() -> dict[str, CropParams]:
@@ -76,6 +98,56 @@ def _europe_row_col_slice(lat_size: int, lon_size: int) -> tuple[int, int, int, 
     return int(lat_rows[0]), int(lat_rows[-1]) + 1, int(lon_cols[0]), int(lon_cols[-1]) + 1
 
 
+def _load_year_stack(year: int) -> YearStack:
+    """Load and cache the Europe-clipped tmean+tmin stacks for a full Jan–May season.
+
+    This is the expensive step (~60 s cold, <100 ms warm). It is crop-agnostic, so every
+    crop sharing a year reuses the same cached stack instead of re-reading 302 NetCDF files.
+    """
+    cache_key = f"gdd_stack_{year}"
+    cached = temperature_cache.get(cache_key)
+    if isinstance(cached, YearStack):
+        return cached
+
+    start = date(year, *_SEASON_START)
+    end = date(year, *_SEASON_END)
+
+    mean_pairs = NetCDFService.get_temperature_slice_range(start, end, temp_type="mean")
+    min_pairs = NetCDFService.get_temperature_slice_range(start, end, temp_type="min")
+
+    mean_by_date = {d: arr for d, arr in mean_pairs}
+    min_by_date = {d: arr for d, arr in min_pairs}
+    common = sorted(set(mean_by_date) & set(min_by_date))
+
+    if not common:
+        raise ValueError(f"No overlapping tmean/tmin dates for {year} season")
+
+    lat_size, lon_size = mean_by_date[common[0]].shape
+    r0, r1, c0, c1 = _europe_row_col_slice(lat_size, lon_size)
+
+    tmean_stack = np.stack([mean_by_date[d][r0:r1, c0:c1] for d in common], axis=0)
+    tmin_stack = np.stack([min_by_date[d][r0:r1, c0:c1] for d in common], axis=0)
+
+    lat_idx = np.linspace(90, -90, lat_size)
+    lon_idx = np.linspace(-180, 180, lon_size)
+    bounds = EuropeBounds(
+        min_lat=float(lat_idx[r1 - 1]),
+        max_lat=float(lat_idx[r0]),
+        min_lon=float(lon_idx[c0]),
+        max_lon=float(lon_idx[c1 - 1]),
+    )
+
+    stack = YearStack(tmean_stack=tmean_stack, tmin_stack=tmin_stack, bounds=bounds)
+    temperature_cache.set(cache_key, stack)
+    logger.info("GDD year stack cached: year=%d shape=%s", year, tmean_stack.shape)
+    return stack
+
+
+def warm_year_stack(year: int) -> None:
+    """Populate the diskcache for one year's stack. Idempotent; safe to call concurrently."""
+    _load_year_stack(year)
+
+
 class GDDService:
     @staticmethod
     def compute_frost_event_count(year: int, crop: CropParams) -> GDDResult:
@@ -91,60 +163,32 @@ class GDDService:
         """
         cache_key = f"gdd_frost_{year}_{crop.name}"
         cached = temperature_cache.get(cache_key)
-        if cached is not None:
+        if isinstance(cached, GDDResult):
             logger.debug("GDD cache hit: %s", cache_key)
-            eu_min_lat, eu_max_lat, eu_min_lon, eu_max_lon = CONTINENTS["Europe"]
-            return GDDResult(cached, EuropeBounds(eu_min_lat, eu_max_lat, eu_min_lon, eu_max_lon))
+            return cached
 
-        start = date(year, *_SEASON_START)
-        end = date(year, *_SEASON_END)
-
-        mean_pairs = NetCDFService.get_temperature_slice_range(start, end, temp_type="mean")
-        min_pairs = NetCDFService.get_temperature_slice_range(start, end, temp_type="min")
-
-        mean_by_date = {d: arr for d, arr in mean_pairs}
-        min_by_date = {d: arr for d, arr in min_pairs}
-        common = sorted(set(mean_by_date) & set(min_by_date))
-
-        if not common:
-            raise ValueError(f"No overlapping dates for {year} season")
-
-        # Clip to Europe before stacking — reduces stack size from ~3.7 GB to ~166 MB
-        lat_size, lon_size = mean_by_date[common[0]].shape
-        r0, r1, c0, c1 = _europe_row_col_slice(lat_size, lon_size)
-
-        tmean_stack = np.stack([mean_by_date[d][r0:r1, c0:c1] for d in common], axis=0)
-        tmin_stack = np.stack([min_by_date[d][r0:r1, c0:c1] for d in common], axis=0)
+        stack = _load_year_stack(year)
 
         nan_mask = (
-            np.any(np.isnan(tmean_stack), axis=0) | np.any(np.isnan(tmin_stack), axis=0)
+            np.any(np.isnan(stack.tmean_stack), axis=0)
+            | np.any(np.isnan(stack.tmin_stack), axis=0)
         )
 
-        tavg_c = tmean_stack - 273.15
-        tmin_c = tmin_stack - 273.15
+        tavg_c = stack.tmean_stack - 273.15
+        tmin_c = stack.tmin_stack - 273.15
 
         gdd_daily = np.maximum(tavg_c - crop.base_temperature, 0.0)
         gdd_accum = np.cumsum(gdd_daily, axis=0)
 
-        sensitive = gdd_accum >= crop.gdd_threshold     # (T, lat, lon)
-        ever_sensitive = sensitive.any(axis=0)           # (lat, lon)
+        sensitive = gdd_accum >= crop.gdd_threshold
+        ever_sensitive = sensitive.any(axis=0)
         frost = sensitive & (tmin_c < crop.frost_threshold)
 
         frost_count = frost.sum(axis=0).astype(np.float32)
         frost_count[nan_mask] = np.nan
-        # Cells that never warmed enough to reach budbreak
         frost_count[(~ever_sensitive) & (~nan_mask)] = _NEVER_REACHED_BUDBREAK
 
-        temperature_cache.set(cache_key, frost_count)
+        result = GDDResult(frost_count, stack.bounds)
+        temperature_cache.set(cache_key, result)
         logger.info("GDD computed: year=%d crop=%s", year, crop.name)
-
-        # Recover exact lat/lon bounds from the slice we used
-        lat_idx = np.linspace(90, -90, lat_size)
-        lon_idx = np.linspace(-180, 180, lon_size)
-        bounds = EuropeBounds(
-            min_lat=float(lat_idx[r1 - 1]),
-            max_lat=float(lat_idx[r0]),
-            min_lon=float(lon_idx[c0]),
-            max_lon=float(lon_idx[c1 - 1]),
-        )
-        return GDDResult(frost_count, bounds)
+        return result

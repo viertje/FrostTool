@@ -55,6 +55,7 @@ def layout() -> dbc.Row:
                 width=3,
                 style=_SIDEBAR_STYLE,
                 children=[
+                    dcc.Store(id="gdd-page-store", data=True),
                     html.H6("CROP", style=_LABEL_STYLE),
                     dcc.Dropdown(
                         id="gdd-crop-selector",

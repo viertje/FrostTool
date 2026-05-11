@@ -1,6 +1,6 @@
 # FrostTool — Current State
 
-Last updated: 2026-05-06
+Last updated: 2026-05-11
 
 ---
 
@@ -31,16 +31,16 @@ A geospatial climate visualisation tool built on **AgERA5** daily 2 m air temper
 ```
 FrostTool/
 ├── backend/
-│   ├── main.py                     FastAPI app factory, includes both routers
+│   ├── main.py                     FastAPI app factory + lifespan warm-up
 │   ├── core/
-│   │   ├── config.py               TEMPERATURE_SOURCES, CONTINENTS, CROPS_CONFIG_PATH
+│   │   ├── config.py               TEMPERATURE_SOURCES, CONTINENTS, CROPS_CONFIG_PATH, GDD_WARMUP_MIN_YEAR
 │   │   └── exceptions.py           DatasetNotFoundError, VariableNotFoundError, etc.
 │   ├── models/
 │   │   ├── domain.py               ColorscaleInfo dataclass
 │   │   └── schemas.py              Pydantic response models (incl. GDD models)
 │   ├── services/
 │   │   ├── netcdf_service.py       NetCDFService: read slices, build GeoTIFF bytes
-│   │   ├── gdd_service.py          GDDService: compute frost event counts per cell
+│   │   ├── gdd_service.py          GDDService + YearStack two-level cache
 │   │   ├── cache_service.py        diskcache + LRU wrapper
 │   │   └── aggregation_service.py  min/max/mean aggregation over date ranges
 │   └── api/routes/
@@ -51,7 +51,7 @@ FrostTool/
 │   ├── config.py                   API_BASE_URL = http://localhost:8000/api/v1
 │   ├── pages/
 │   │   ├── heatmap.py              Registered at /
-│   │   └── gdd.py                  Registered at /gdd
+│   │   └── gdd.py                  Registered at /gdd — layout() makes zero API calls
 │   ├── components/
 │   │   ├── controls.py             create_shared_header(), create_controls(), create_map_frame()
 │   │   ├── map_component.py        HTML template + get_map_html() for heatmap iframe
@@ -62,7 +62,7 @@ FrostTool/
 │   └── callbacks/
 │       ├── map_callbacks.py        Heatmap render, coordinate bridge iframe→Dash
 │       ├── graph_callbacks.py      Timeseries chart, date status display
-│       └── gdd_callbacks.py        GDD render button → updates iframe srcDoc
+│       └── gdd_callbacks.py        Dropdown init, GDD render button
 ├── crops.txt                       INI-format crop parameters (editable without code changes)
 └── currentState.md                 This file
 ```
@@ -77,11 +77,11 @@ C:\Olivier\Terra local\data\AgERA5\
 │   └── {YYYY}\   ← years 1979–2022
 │       └── *.nc  (one file per day, Temperature_Air_2m_Mean_24h variable)
 └── tmin_v2\
-    └── {YYYY}\   ← years 1979–2007 only
+    └── {YYYY}\   ← years 1979–2007 only (test dataset)
         └── *.nc  (one file per day, Temperature_Air_2m_Min_24h variable)
 ```
 
-**Important:** `tmin` only goes to 2007. The GDD year dropdown is therefore limited to years available in BOTH `tmean` and `tmin` folders, determined at runtime by `get_available_gdd_years()`.
+**Important:** `tmin` only goes to 2007 in the current test dataset. When deployed with a full S3 dataset both variables will cover up to the current year. The GDD year dropdown is limited to years available in **both** `tmean` and `tmin` folders, determined at startup by `get_available_gdd_years()` (result cached in memory — see GDD caching section).
 
 ---
 
@@ -105,28 +105,42 @@ C:\Olivier\Terra local\data\AgERA5\
 |---|---|---|
 | GET | `/raster` | GeoTIFF frost event count raster for `year` + `crop`. Values: NaN=ocean, -1=never budbreak, 0=no frost, ≥1=count. |
 | GET | `/colorscale` | Max frost count for the year (min always 0) |
-| GET | `/crops` | List of crop names from `crops.txt` |
-| GET | `/available-years` | Years where both tmean and tmin data exist |
+| GET | `/crops` | List of crop names from `crops.txt` (reloaded per request — editable live) |
+| GET | `/available-years` | Years where both tmean and tmin data exist (served from memory cache) |
 
 ---
 
-## GDD algorithm (gdd_service.py)
+## GDD algorithm and caching (`gdd_service.py`)
 
 Season: **1 Jan – 31 May** per year.
 
-1. Load daily `tmean` and `tmin` NetCDF slices for the full season.
-2. **Clip to Europe before stacking** — reduces stack from ~3.7 GB to ~166 MB.
-3. Compute:
-   ```
-   gdd_daily  = max(Tavg_celsius - base_temperature, 0)
-   gdd_accum  = cumsum(gdd_daily, axis=time)
-   sensitive  = gdd_accum >= gdd_threshold          # budbreak reached
-   frost      = sensitive & (Tmin_celsius < frost_threshold)
-   frost_count = frost.sum(axis=time)               # per cell
-   ```
-4. Cells where `sensitive` was never True → set to sentinel `-1.0` (never reached budbreak).
-5. Ocean/no-data cells stay `NaN`.
-6. Result cached in diskcache with key `gdd_frost_{year}_{crop}`.
+### Two-level cache
+
+The computation is split so expensive file I/O is separated from cheap numpy math:
+
+**Level 1 — `YearStack` (crop-agnostic, key `gdd_stack_{year}`):**
+- Loads all daily `tmean` and `tmin` NetCDF slices for the Jan–May season (~302 files)
+- Clips both stacks to Europe (reduces ~3.7 GB → ~166 MB combined)
+- Stores `tmean_stack`, `tmin_stack`, and `EuropeBounds` in diskcache
+- Cold load: ~60 s (302 sequential file reads through `_HDF5_LOCK`); warm: <100 ms
+
+**Level 2 — `GDDResult` (per crop, key `gdd_frost_{year}_{crop}`):**
+- Runs fast numpy math over the cached `YearStack` (~1–2 s)
+- Caches the full `GDDResult` (frost_count array + bounds) so bounds are always accurate
+- Cold (stack warm): ~2 s; warm: <100 ms
+
+### Algorithm
+
+```
+gdd_daily  = max(Tavg_celsius - base_temperature, 0)
+gdd_accum  = cumsum(gdd_daily, axis=time)
+sensitive  = gdd_accum >= gdd_threshold          # budbreak reached
+frost      = sensitive & (Tmin_celsius < frost_threshold)
+frost_count = frost.sum(axis=time)               # per cell
+```
+
+Cells where `sensitive` was never True → set to sentinel `-1.0` (never reached budbreak).
+Ocean/no-data cells stay `NaN`.
 
 ### Crop parameters (`crops.txt`)
 
@@ -144,14 +158,42 @@ display_name = Apple
 base_temperature = 4
 gdd_threshold = 150
 frost_threshold = -2
+
+[pear]
+display_name = Pear
+base_temperature = 4
+gdd_threshold = 170
+frost_threshold = -2
+
+[cherry]
+display_name = Cherry
+base_temperature = 4
+gdd_threshold = 120
+frost_threshold = -2
 ```
+
+---
+
+## Startup warm-up (`main.py`)
+
+On backend startup the `lifespan` context manager:
+
+1. **Synchronously** calls `get_available_gdd_years()` to populate its in-memory cache before the warm-up thread starts. This prevents the warm-up's disk I/O from blocking the Uvicorn async event loop on the first `/gdd/available-years` request.
+2. Starts a **background daemon thread** (`gdd-warmup`) that pre-warms all `YearStack` + `GDDResult` combinations for years ≥ `GDD_WARMUP_MIN_YEAR` (default 2000, overridable via env var). Years are warmed most-recent-first. After the warm-up completes, every user render request is a diskcache hit.
+
+**Expected cold warm-up time (local test data, 2000–2007 = 8 years):**
+- ~60 s per year for the first stack (302 file reads)
+- ~2 s per additional crop on the same year (cached stack)
+- Total: ~8–10 min background, app is fully usable the entire time
+
+The app serves requests immediately; the warm-up only reduces first-render latency for uncached year×crop combos.
 
 ---
 
 ## Frontend — Heatmap page (`/`)
 
 - **Sidebar:** continent selector, temperature type (mean/min), date range picker (max 180 days), Render button, stats box.
-- **Map iframe:** Leaflet + `georaster-layer-for-leaflet`. Absolute temperature colour scale −40°C (blue) → 50°C (dark red). Click sends `postMessage` to parent Dash frame.
+- **Map iframe:** Leaflet + `georaster-layer-for-leaflet`. Absolute temperature colour scale −40°C (blue) → 50°C (dark red). `opacity: 0.45` at layer level. Click sends `postMessage` to parent Dash frame.
 - **Coordinate bridge:** `clientside_callback` listens for `coordinateClicked` postMessage, clicks a hidden button, stores lat/lon/date in `dcc.Store`.
 - **Graph panel:** Plotly timeseries chart slides up (25% height) on cell click, shows temperature for the selected date range at the clicked coordinate. Closeable.
 - **Zoom refetch:** re-fetches raster at crossing zoom thresholds (4, 8) for adaptive resolution.
@@ -160,13 +202,14 @@ frost_threshold = -2
 
 ## Frontend — Frost Risk page (`/gdd`)
 
-- **Sidebar:** crop dropdown (fetched from `/gdd/crops`), year dropdown (fetched from `/gdd/available-years`, newest year default), Render button, status text, legend, methodology note.
+- **Sidebar:** crop dropdown, year dropdown, Render button, status text, legend, methodology note.
+- **Dropdown population:** `layout()` renders empty dropdowns immediately (no blocking calls). A `dcc.Store(id="gdd-page-store", data=True)` in the layout triggers `populate_gdd_dropdowns` once on mount. That callback fetches `/gdd/crops` and `/gdd/available-years` **in parallel** (2 threads, 5 s timeout). Results are cached at module level so re-navigation is instant.
 - **Map iframe:** Leaflet + `georaster-layer-for-leaflet`, centered on Europe `[52, 15]` zoom 4.
-- **Colour scale:**
-  - Grey (`rgba(190,190,190,0.60)`) — never reached budbreak
-  - Green (`rgba(45,138,78,0.55)`) — budbreak reached, 0 frost events
-  - Blue (`rgba(59,130,246,0.75)`) — 1 frost event
-  - Orange → dark red (chroma.mix LAB, 0.82 alpha) — 2+ frost events
+- **Colour scale** (solid hex colours, transparency via `opacity: 0.75` on the layer — matches the heatmap approach, prevents tile-seam grid artefacts):
+  - `#bebebe` — never reached budbreak
+  - `#2d8a4e` — budbreak reached, 0 frost events
+  - `#3b82f6` — 1 frost event
+  - `#f97316` → `#7f1d1d` (chroma LAB mix) — 2+ frost events
 - **Render flow:** button click → `gdd_callbacks.py` builds URL `/gdd/raster?year=…&crop=…` → replaces iframe `srcDoc` with HTML that auto-calls `window.loadGDDRaster(url, year, crop)` after 100 ms.
 - Click sends `gddCoordinateClicked` postMessage (lat/lon only, no further handling yet).
 
@@ -182,26 +225,21 @@ Page layouts use `height: calc(100vh - 72px)` to fill below the header.
 
 ---
 
-## Known open issue
+## Known open issues / next priorities
 
-**Tile grid visible on the GDD (and heatmap) map.** A rectangular grid matching the `georaster-layer-for-leaflet` canvas tile boundaries is visible on both maps. The grid lines are the CartoDB dark basemap showing through gaps between tiles. This is a known rendering artefact of canvas-based tile layers.
-
-Things that were tried and **did not work** or **made it worse**:
-- `padding: 0.1` on `GeoRasterLayer` — wrong option, does nothing for seams
-- `transform: scale(1.01)` CSS on `.leaflet-tile-pane canvas` — made the grid intensify with every zoom step (compounds with Leaflet's own zoom transforms)
-
-Things currently in place (partial mitigation only):
-- `updateWhenZooming: false` on `GeoRasterLayer` in both `map.js` and `gdd_map.js`
-
-The root cause is still being investigated. The canvas tiles from `georaster-layer-for-leaflet` have sub-pixel gaps that expose the layer behind them. The `transform: scale()` approach is ruled out. Approaches not yet tried include overriding individual tile canvas `width`/`height` in CSS (e.g. `257px` instead of `256px` to create a 1px overlap without using transforms).
+**Backend loading times are still slow on first render (cache cold).**
+The first GDD render for an uncached year×crop combination takes ~30–60 s due to sequential NetCDF file reads serialised through `_HDF5_LOCK`. The warm-up mitigates this for years ≥ 2000 after the background thread completes, but the thread itself takes ~8–10 min. Potential optimisations to investigate:
+- Reduce per-file read overhead (e.g. lazy-loading only the required spatial slice rather than full global arrays)
+- Parallelise across years rather than across daily files within a year (disk-head locality)
+- For S3 deployment: pre-generate and store all `YearStack` and `GDDResult` objects as static artefacts, eliminating runtime computation entirely
 
 ---
 
 ## How to run
 
 ```
-# Backend (from project root)
-uvicorn backend.main:app --reload --port 8000
+# Backend (from project root, with PYTHONPATH=.)
+uvicorn backend.main:app --host 127.0.0.1 --port 8000
 
 # Frontend (from project root)
 python -m frontend.app

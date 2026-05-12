@@ -3,8 +3,15 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from backend.core.exceptions import DatasetNotFoundError
-from backend.models.schemas import CropInfo, CropsResponse, GDDAvailableYearsResponse, GDDColorscaleResponse
-from backend.services.gdd_service import GDDService, get_available_gdd_years, load_crops
+from backend.models.schemas import (
+    CropInfo,
+    CropsResponse,
+    GDDAvailableYearsResponse,
+    GDDColorscaleResponse,
+    GDDTimeseriesDataPoint,
+    GDDTimeseriesResponse,
+)
+from backend.services.gdd_service import GDDService, get_available_gdd_years, get_gdd_timeseries, load_crops
 from backend.services.netcdf_service import _build_raster_bytes_preclipped
 
 router = APIRouter(prefix="/api/v1/gdd", tags=["gdd"])
@@ -64,6 +71,49 @@ async def get_gdd_raster(
         )
     except HTTPException:
         raise
+    except DatasetNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No climate data for year {year}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/timeseries", response_model=GDDTimeseriesResponse)
+async def get_gdd_timeseries_endpoint(
+    lat: float = Query(..., ge=-90, le=90),
+    lon: float = Query(..., ge=-180, le=180),
+    year: int = Query(..., ge=1979, le=2100),
+    crop: str = Query(..., description="Crop key from crops.txt"),
+) -> GDDTimeseriesResponse:
+    try:
+        crops = load_crops()
+        if crop not in crops:
+            raise HTTPException(status_code=404, detail=f"Crop '{crop}' not found in crops.txt")
+        crop_params = crops[crop]
+        result = get_gdd_timeseries(lat, lon, year, crop_params)
+        return GDDTimeseriesResponse(
+            lat=lat,
+            lon=lon,
+            year=year,
+            crop=crop,
+            crop_display_name=crop_params.display_name,
+            gdd_threshold=crop_params.gdd_threshold,
+            frost_threshold=crop_params.frost_threshold,
+            budbreak_date=result.budbreak_date,
+            frost_event_dates=result.frost_event_dates,
+            data=[
+                GDDTimeseriesDataPoint(
+                    date=result.season_dates[i],
+                    cumulative_gdd=float(result.gdd_accum[i]),
+                    daily_tmin=float(result.tmin_c[i]),
+                    daily_tavg=float(result.tavg_c[i]),
+                )
+                for i in range(len(result.season_dates))
+            ],
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     except DatasetNotFoundError:
         raise HTTPException(status_code=404, detail=f"No climate data for year {year}")
     except Exception as exc:

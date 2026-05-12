@@ -1,7 +1,7 @@
 import configparser
 import logging
-from dataclasses import dataclass
-from datetime import date
+from dataclasses import dataclass, field
+from datetime import date, timedelta
 from typing import NamedTuple
 
 import numpy as np
@@ -45,6 +45,17 @@ class YearStack:
     tmean_stack: np.ndarray  # (T, lat, lon) Kelvin
     tmin_stack: np.ndarray   # (T, lat, lon) Kelvin
     bounds: EuropeBounds
+    dates: list[date] = field(default_factory=list)  # length T; older cache entries omit this
+
+
+@dataclass
+class GDDTimeseriesResult:
+    season_dates: list[str]
+    gdd_accum: np.ndarray   # float64 (T,)
+    tmin_c: np.ndarray      # float64 (T,)
+    tavg_c: np.ndarray      # float64 (T,)
+    budbreak_date: str | None
+    frost_event_dates: list[str]
 
 
 _available_years: list[int] | None = None
@@ -137,7 +148,7 @@ def _load_year_stack(year: int) -> YearStack:
         max_lon=float(lon_idx[c1 - 1]),
     )
 
-    stack = YearStack(tmean_stack=tmean_stack, tmin_stack=tmin_stack, bounds=bounds)
+    stack = YearStack(tmean_stack=tmean_stack, tmin_stack=tmin_stack, bounds=bounds, dates=common)
     temperature_cache.set(cache_key, stack)
     logger.info("GDD year stack cached: year=%d shape=%s", year, tmean_stack.shape)
     return stack
@@ -192,3 +203,74 @@ class GDDService:
         temperature_cache.set(cache_key, result)
         logger.info("GDD computed: year=%d crop=%s", year, crop.name)
         return result
+
+
+def get_gdd_timeseries(
+    lat: float,
+    lon: float,
+    year: int,
+    crop: CropParams,
+) -> GDDTimeseriesResult:
+    """Return daily GDD accumulation + Tmin series for a single Europe grid cell.
+
+    Uses the cached YearStack so this is fast when the stack is already warm.
+    Raises ValueError for ocean cells or coordinates outside the Europe extent.
+    """
+    stack = _load_year_stack(year)
+    bounds = stack.bounds
+
+    if not (bounds.min_lat <= lat <= bounds.max_lat and bounds.min_lon <= lon <= bounds.max_lon):
+        raise ValueError(
+            f"Coordinates ({lat}, {lon}) are outside the Europe dataset bounds "
+            f"(lat {bounds.min_lat}–{bounds.max_lat}, lon {bounds.min_lon}–{bounds.max_lon})"
+        )
+
+    n_days = stack.tmean_stack.shape[0]
+    lat_size = stack.tmean_stack.shape[1]
+    lon_size = stack.tmean_stack.shape[2]
+
+    # Reconstruct coordinate arrays — lat decreases top-to-bottom, lon increases left-to-right.
+    lat_arr = np.linspace(bounds.max_lat, bounds.min_lat, lat_size)
+    lon_arr = np.linspace(bounds.min_lon, bounds.max_lon, lon_size)
+    row = int(np.argmin(np.abs(lat_arr - lat)))
+    col = int(np.argmin(np.abs(lon_arr - lon)))
+
+    tmean_series = stack.tmean_stack[:, row, col]
+    tmin_series = stack.tmin_stack[:, row, col]
+
+    if np.any(np.isnan(tmean_series)) or np.any(np.isnan(tmin_series)):
+        raise ValueError("Selected cell contains no data (ocean or missing)")
+
+    tavg_c = tmean_series - 273.15
+    tmin_c = tmin_series - 273.15
+    gdd_daily = np.maximum(tavg_c - crop.base_temperature, 0.0)
+    gdd_accum = np.cumsum(gdd_daily)
+
+    # Use stored dates when available; fall back to consecutive days from Jan 1.
+    stored = getattr(stack, "dates", None)
+    if stored:
+        season_dates = [d.isoformat() for d in stored]
+    else:
+        season_dates = [
+            (date(year, 1, 1) + timedelta(days=i)).isoformat() for i in range(n_days)
+        ]
+
+    budbreak_idx = np.where(gdd_accum >= crop.gdd_threshold)[0]
+    budbreak_date = season_dates[budbreak_idx[0]] if len(budbreak_idx) > 0 else None
+
+    sensitive = gdd_accum >= crop.gdd_threshold
+    frost = sensitive & (tmin_c < crop.frost_threshold)
+    frost_event_dates = [season_dates[i] for i in range(n_days) if frost[i]]
+
+    logger.debug(
+        "GDD timeseries: year=%d crop=%s lat=%.4f lon=%.4f budbreak=%s frost_events=%d",
+        year, crop.name, lat, lon, budbreak_date, len(frost_event_dates),
+    )
+    return GDDTimeseriesResult(
+        season_dates=season_dates,
+        gdd_accum=gdd_accum,
+        tmin_c=tmin_c,
+        tavg_c=tavg_c,
+        budbreak_date=budbreak_date,
+        frost_event_dates=frost_event_dates,
+    )

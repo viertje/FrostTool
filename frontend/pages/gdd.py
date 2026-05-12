@@ -131,8 +131,67 @@ def layout() -> dbc.Row:
             ),
             dbc.Col(
                 width=9,
-                style={"padding": "0", "height": "100%"},
-                children=[create_gdd_map_frame()],
+                style={
+                    "padding": "0",
+                    "height": "100%",
+                    "display": "flex",
+                    "flexDirection": "column",
+                },
+                children=[
+                    html.Div(
+                        style={"flex": "1", "minHeight": "0", "position": "relative"},
+                        children=[
+                            create_gdd_map_frame(),
+                            dcc.Store(id="gdd-coordinate-intermediate"),
+                            dcc.Store(id="gdd-clicked-coordinate"),
+                            html.Button(
+                                id="gdd-coordinate-trigger",
+                                style={"display": "none"},
+                                n_clicks=0,
+                            ),
+                        ],
+                    ),
+                    html.Div(
+                        id="gdd-graph-container",
+                        style={
+                            "height": "0%",
+                            "borderTop": "1px solid #3C8361",
+                            "background": "#0D4F44",
+                            "overflow": "hidden",
+                            "transition": "height 0.3s ease",
+                            "position": "relative",
+                        },
+                        children=[
+                            html.Button(
+                                "✕",
+                                id="gdd-close-graph-btn",
+                                n_clicks=0,
+                                style={
+                                    "position": "absolute",
+                                    "top": "8px",
+                                    "right": "8px",
+                                    "background": "transparent",
+                                    "border": "none",
+                                    "color": "#D6CDA4",
+                                    "fontSize": "20px",
+                                    "cursor": "pointer",
+                                    "padding": "0",
+                                    "width": "24px",
+                                    "height": "24px",
+                                    "display": "flex",
+                                    "alignItems": "center",
+                                    "justifyContent": "center",
+                                    "zIndex": "10",
+                                },
+                            ),
+                            dcc.Graph(
+                                id="gdd-timeseries-graph",
+                                style={"height": "100%", "margin": "0"},
+                                config={"responsive": True, "displayModeBar": False},
+                            ),
+                        ],
+                    ),
+                ],
             ),
         ],
     )

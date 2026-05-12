@@ -66,3 +66,23 @@ class ContinentBounds(BaseModel):
 
 class ContinentDetail(BaseModel):
     bounds: ContinentBounds
+
+
+class GDDTimeseriesDataPoint(BaseModel):
+    date: str
+    cumulative_gdd: float
+    daily_tmin: float
+    daily_tavg: float
+
+
+class GDDTimeseriesResponse(BaseModel):
+    lat: float
+    lon: float
+    year: int
+    crop: str
+    crop_display_name: str
+    gdd_threshold: float
+    frost_threshold: float
+    budbreak_date: str | None
+    frost_event_dates: list[str]
+    data: list[GDDTimeseriesDataPoint]

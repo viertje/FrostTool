@@ -97,14 +97,17 @@
     }
   });
 
-  // Click: send coordinate to parent Dash frame for future detail panel
+  // Click: send coordinate + current year/crop to parent Dash frame.
   map.on('click', function (e) {
+    if (!currentYear || !currentCrop) return;
     const lat = e.latlng.lat.toFixed(4);
     const lon = (((e.latlng.lng + 180) % 360) - 180).toFixed(4);
     window.parent.postMessage({
       type: 'gddCoordinateClicked',
       lat: parseFloat(lat),
       lon: parseFloat(lon),
+      year: currentYear,
+      crop: currentCrop,
     }, '*');
   });
 
